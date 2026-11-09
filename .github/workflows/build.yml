@@ -1,0 +1,79 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Если в репозитории лежит только zip с проектом, распаковываем его сами
+      - name: Распаковать zip, если исходники в архиве
+        run: |
+          set -euo pipefail
+          if ! find . -maxdepth 3 -name 'settings.gradle*' -not -path './.git/*' | grep -q .; then
+            shopt -s nullglob
+            found=0
+            for z in ./*.zip; do
+              echo "Распаковка $z"
+              unzip -o -q "$z" -d _src
+              found=1
+            done
+            if [ "$found" -eq 0 ]; then
+              echo "::error::Нет settings.gradle и нет zip с проектом"
+              exit 1
+            fi
+          fi
+
+      - name: Найти Gradle-проект
+        run: |
+          set -euo pipefail
+          S=$(find . -maxdepth 4 \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -not -path './.git/*' | head -1)
+          if [ -z "$S" ]; then
+            echo "::error::settings.gradle.kts не найден. Смотри дерево выше."
+            find . -maxdepth 4 -not -path './.git/*' | sort | head -80
+            exit 1
+          fi
+          DIR=$(cd "$(dirname "$S")" && pwd)
+          echo "Gradle-проект найден: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Chaquopy компилирует .pyc байткодом buildPython. Он должен совпадать с Python в приложении.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # Пакет "tools" из дефолта action уже убран из SDK и валит установку.
+          packages: platform-tools platforms;android-34 build-tools;34.0.0
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PyIDE-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
